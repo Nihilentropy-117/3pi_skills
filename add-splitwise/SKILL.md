@@ -143,7 +143,7 @@ quote escaping. Use `splitwise-add list premade` to inspect it and
 
 Current saved transactions:
 
-- `phone_bill` / aliases `phone bill`, `phone`: group `31014911`, description `Phone Bill for {current_month}`, no default payer (ask or pass `--paid-by`).
+- `phone_bill` / aliases `phone bill`, `phone`: group `31014911`, description `Phone Bill for {current_month}`, default payer Gray (21510761), total $560.00.
 - `power_bill` / aliases `power bill`, `power`, `electric bill`: group `72165496`, description `Utilities for {current_month} — Power $650, Internet $105, Water $200`.
 
 Run a premade transaction by name or alias:
