@@ -77,7 +77,7 @@ def auth_header() -> dict[str, str]:
 
 def api_request(method: str, path: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     url = f"{API_BASE}{path}"
-    headers = {"Accept": "application/json", **auth_header()}
+    headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", **auth_header()}
     body = None
     if data is not None:
         body = urlencode(data, doseq=True).encode("utf-8")

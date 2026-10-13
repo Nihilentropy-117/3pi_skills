@@ -52,6 +52,7 @@ Use these IDs first. If the user mentions a person not listed here, query Splitw
 | 23353628 | Ethan |
 | 22664155 | Hiro (Chris) |
 | 51393333 | Elle Scott |
+| 83976680 | Kas Johnson |
 
 ## Known groups
 
