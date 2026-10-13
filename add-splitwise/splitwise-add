@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""Helper for adding Splitwise expenses and running saved premade transactions."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import os
+import sys
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+
+API_BASE = os.environ.get("SPLITWISE_API_BASE", "https://secure.splitwise.com/api/v3.0")
+SKILL_DIR = Path(__file__).resolve().parent
+DEFAULT_PREMADE = SKILL_DIR / "transactions.jsonl"
+
+KNOWN_PEOPLE = {
+    "53665987": "Nathan Gruebmeyer",
+    "48415524": "Fen Jensen",
+    "22444750": "Skye Nova",
+    "48415650": "Tuca",
+    "21510761": "Gray Lott (me)",
+    "23353628": "Ethan",
+    "22664155": "Hiro (Chris)",
+    "51393333": "Elle Scott",
+}
+
+KNOWN_GROUPS = {
+    "72165496": "12112 Bills And Household Expenses",
+    "31014911": "Phone Bill",
+}
+
+
+def money(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value).replace("$", "").replace(",", "").strip()).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"Invalid money amount {value!r}: {exc}") from exc
+
+
+def money_str(value: Any) -> str:
+    return f"{money(value):.2f}"
+
+
+def split_ids(values: list[str] | None) -> list[str]:
+    ids: list[str] = []
+    for value in values or []:
+        for part in str(value).split(","):
+            part = part.strip()
+            if part:
+                ids.append(part)
+    return ids
+
+
+def auth_header() -> dict[str, str]:
+    token = (
+        os.environ.get("SPLITWISE_API_KEY")
+        or os.environ.get("SPLITWISE_ACCESS_TOKEN")
+        or os.environ.get("SPLITWISE_BEARER_TOKEN")
+    )
+    if not token:
+        ck = os.environ.get("SPLITWISE_CONSUMER_KEY")
+        cs = os.environ.get("SPLITWISE_CONSUMER_SECRET")
+        msg = "Missing Splitwise API token. Set SPLITWISE_API_KEY (or SPLITWISE_ACCESS_TOKEN/SPLITWISE_BEARER_TOKEN)."
+        if ck or cs:
+            msg += " Consumer key/secret are present, but this helper needs an API key or bearer access token for API calls."
+        raise SystemExit(msg)
+    return {"Authorization": f"Bearer {token}"}
+
+
+def api_request(method: str, path: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    url = f"{API_BASE}{path}"
+    headers = {"Accept": "application/json", **auth_header()}
+    body = None
+    if data is not None:
+        body = urlencode(data, doseq=True).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    req = Request(url, data=body, headers=headers, method=method.upper())
+    try:
+        with urlopen(req, timeout=30) as resp:  # noqa: S310
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw.strip() else {}
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"Splitwise API HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise SystemExit(f"Splitwise API request failed: {exc}") from exc
+
+
+def person_name(user: dict[str, Any]) -> str:
+    first = (user.get("first_name") or "").strip()
+    last = (user.get("last_name") or "").strip()
+    name = " ".join(p for p in (first, last) if p).strip()
+    return name or user.get("email") or str(user.get("id", ""))
+
+
+def list_people(_args: argparse.Namespace) -> None:
+    people: dict[str, str] = dict(KNOWN_PEOPLE)
+
+    try:
+        me = api_request("GET", "/get_current_user").get("user") or {}
+        if me.get("id") is not None:
+            people[str(me["id"])] = person_name(me) + " (current user)"
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+    friends = api_request("GET", "/get_friends").get("friends") or []
+    for friend in friends:
+        if friend.get("id") is not None:
+            people[str(friend["id"])] = person_name(friend)
+
+    try:
+        groups = api_request("GET", "/get_groups").get("groups") or []
+        for group in groups:
+            for member in group.get("members") or []:
+                if member.get("id") is not None:
+                    people.setdefault(str(member["id"]), person_name(member))
+    except Exception:
+        pass
+
+    for uid, name in sorted(people.items(), key=lambda item: item[1].lower()):
+        print(f"{uid}\t{name}")
+
+
+def list_groups(_args: argparse.Namespace) -> None:
+    groups: dict[str, str] = dict(KNOWN_GROUPS)
+    for group in api_request("GET", "/get_groups").get("groups") or []:
+        if group.get("id") is not None:
+            groups[str(group["id"])] = group.get("name") or str(group["id"])
+    for gid, name in sorted(groups.items(), key=lambda item: item[1].lower()):
+        print(f"{gid}\t{name}")
+
+
+def load_premade(path: Path = DEFAULT_PREMADE) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            row = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            # Skip rather than abort: one corrupt line must not take down every
+            # other premade transaction. Use `premade add` instead of hand-edits.
+            print(f"Warning: skipping invalid JSON in {path}:{lineno}: {exc}", file=sys.stderr)
+            continue
+        row["__line__"] = lineno
+        rows.append(row)
+    return rows
+
+
+def list_premade(args: argparse.Namespace) -> None:
+    for row in load_premade(Path(args.file)):
+        aliases = ", ".join(row.get("aliases") or [])
+        group = row.get("group_id", "")
+        paid_by = row.get("paid_by") or "(ask/override required)"
+        print(f"{row.get('name')}\tgroup={group}\tpaid_by={paid_by}\taliases={aliases}\tdescription={row.get('description')}")
+
+
+def find_premade(name: str, path: Path) -> dict[str, Any]:
+    needle = name.strip().lower()
+    for row in load_premade(path):
+        names = [str(row.get("name", "")), *[str(a) for a in row.get("aliases") or []]]
+        if any(needle == candidate.strip().lower() for candidate in names):
+            return row
+    raise SystemExit(f"No premade transaction named {name!r}. Run: splitwise-add list premade")
+
+
+def expand_placeholders(text: str) -> str:
+    today = _dt.date.today()
+    return (
+        text.replace("{current_month}", today.strftime("%B %Y"))
+        .replace("{Current Month}", today.strftime("%B %Y"))
+        .replace("{month}", today.strftime("%B"))
+        .replace("{Month}", today.strftime("%B"))
+        .replace("{year}", today.strftime("%Y"))
+        .replace("{Year}", today.strftime("%Y"))
+        .replace("{today}", today.isoformat())
+    )
+
+
+def parse_shares(share_args: list[str] | None) -> dict[str, str]:
+    shares: dict[str, str] = {}
+    for item in share_args or []:
+        if "=" not in item:
+            raise SystemExit(f"Invalid --share {item!r}; expected USER_ID=AMOUNT")
+        uid, amount = item.split("=", 1)
+        uid = uid.strip()
+        if not uid:
+            raise SystemExit(f"Invalid --share {item!r}; missing USER_ID")
+        shares[uid] = money_str(amount)
+    return shares
+
+
+def build_expense_payload(
+    *,
+    description: str,
+    paid_by: str,
+    currency: str = "USD",
+    group: str | None = None,
+    date: str | None = None,
+    cost: str | None = None,
+    split: str = "equal",
+    owe: list[str] | None = None,
+    shares: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if not description:
+        raise SystemExit("Missing description")
+    if not paid_by:
+        raise SystemExit("Missing payer; pass --paid-by USER_ID")
+
+    payload: dict[str, Any] = {
+        "description": description,
+        "currency_code": currency or "USD",
+    }
+    if group:
+        payload["group_id"] = str(group)
+    if date:
+        payload["date"] = date
+
+    paid_by = str(paid_by)
+    if split == "exact":
+        if not shares:
+            raise SystemExit("Exact split requires --share USER_ID=AMOUNT")
+        total = money(cost) if cost is not None else sum((money(v) for v in shares.values()), Decimal("0.00"))
+        if total <= Decimal("0.00"):
+            raise SystemExit("Cost must be greater than zero")
+        users = sorted(set([paid_by, *[str(uid) for uid in shares.keys()]]), key=lambda x: (x != paid_by, x))
+        payload["cost"] = f"{total:.2f}"
+        for idx, uid in enumerate(users):
+            payload[f"users__{idx}__user_id"] = uid
+            payload[f"users__{idx}__paid_share"] = f"{total:.2f}" if uid == paid_by else "0.00"
+            payload[f"users__{idx}__owed_share"] = money_str(shares.get(uid, "0.00"))
+        return payload
+
+    owed_ids = split_ids(owe)
+    if not owed_ids:
+        raise SystemExit("Equal split requires --owe USER_ID[,USER_ID]")
+    if cost is None:
+        raise SystemExit("Equal split requires --cost TOTAL")
+    total = money(cost)
+    if total <= Decimal("0.00"):
+        raise SystemExit("Cost must be greater than zero")
+    per = (total / Decimal(len(owed_ids))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    # Adjust final participant for penny rounding so shares sum to total.
+    calculated = [per for _ in owed_ids]
+    calculated[-1] = total - sum(calculated[:-1], Decimal("0.00"))
+    share_map = {uid: f"{amount:.2f}" for uid, amount in zip(owed_ids, calculated)}
+    return build_expense_payload(
+        description=description,
+        paid_by=paid_by,
+        currency=currency,
+        group=group,
+        date=date,
+        cost=f"{total:.2f}",
+        split="exact",
+        shares=share_map,
+    )
+
+
+def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    users = []
+    idx = 0
+    while f"users__{idx}__user_id" in payload:
+        uid = str(payload[f"users__{idx}__user_id"])
+        users.append(
+            {
+                "user_id": uid,
+                "name": KNOWN_PEOPLE.get(uid),
+                "paid_share": payload.get(f"users__{idx}__paid_share"),
+                "owed_share": payload.get(f"users__{idx}__owed_share"),
+            }
+        )
+        idx += 1
+    return {
+        "description": payload.get("description"),
+        "cost": payload.get("cost"),
+        "currency_code": payload.get("currency_code"),
+        "group_id": payload.get("group_id"),
+        "group_name": KNOWN_GROUPS.get(str(payload.get("group_id"))) if payload.get("group_id") else None,
+        "date": payload.get("date"),
+        "users": users,
+    }
+
+
+def create_or_print(payload: dict[str, Any], dry_run: bool) -> None:
+    if dry_run:
+        print(json.dumps({"dry_run": True, "payload": payload, "summary": summarize_payload(payload)}, indent=2))
+        return
+    result = api_request("POST", "/create_expense", payload)
+    print(json.dumps({"request_summary": summarize_payload(payload), "response": result}, indent=2))
+
+
+def add_expense(args: argparse.Namespace) -> None:
+    shares = parse_shares(args.share)
+    payload = build_expense_payload(
+        description=args.description,
+        paid_by=args.paid_by,
+        currency=args.currency,
+        group=args.group,
+        date=args.date,
+        cost=args.cost,
+        split=args.split,
+        owe=args.owe,
+        shares=shares,
+    )
+    create_or_print(payload, args.dry_run)
+
+
+def run_premade(args: argparse.Namespace) -> None:
+    row = find_premade(args.name, Path(args.file))
+    paid_by = args.paid_by or row.get("paid_by")
+    if not paid_by:
+        raise SystemExit("Premade transaction has no payer. Pass --paid-by USER_ID.")
+    shares = {str(uid): money_str(amount) for uid, amount in (row.get("owed_shares") or {}).items()}
+    if not shares:
+        raise SystemExit(f"Premade transaction {row.get('name')!r} has no owed_shares")
+    payload = build_expense_payload(
+        description=expand_placeholders(str(row.get("description") or row.get("name") or args.name)),
+        paid_by=str(paid_by),
+        currency=args.currency or row.get("currency_code") or "USD",
+        group=str(args.group or row.get("group_id") or "") or None,
+        date=args.date,
+        split="exact",
+        shares=shares,
+    )
+    create_or_print(payload, args.dry_run)
+
+
+def add_premade(args: argparse.Namespace) -> None:
+    """Append a premade transaction, serializing the JSON ourselves so hand-editing
+    (and the quote-escaping mistakes that come with it) is never necessary."""
+    path = Path(args.file)
+    shares = parse_shares(args.share)
+    if not shares:
+        raise SystemExit("premade add requires at least one --share USER_ID=AMOUNT")
+
+    taken: set[str] = set()
+    for row in load_premade(path):
+        taken.add(str(row.get("name", "")).strip().lower())
+        taken.update(str(a).strip().lower() for a in row.get("aliases") or [])
+    new_names = [args.name, *(args.alias or [])]
+    for candidate in new_names:
+        if candidate.strip().lower() in taken:
+            raise SystemExit(f"Name/alias already in use: {candidate!r}. Run: splitwise-add list premade")
+
+    row = {
+        "name": args.name,
+        "aliases": args.alias or [],
+        "group_id": int(args.group) if args.group and str(args.group).isdigit() else args.group,
+        "description": args.description or args.name,
+        "paid_by": args.paid_by,
+        "currency_code": args.currency or "USD",
+        "owed_shares": shares,
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+    print(json.dumps({"added": row, "file": str(path)}, indent=2))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    list_parser = sub.add_parser("list", help="List known/live Splitwise metadata")
+    list_sub = list_parser.add_subparsers(dest="what", required=True)
+    list_sub.add_parser("people", help="List known people plus live friends/group members").set_defaults(func=list_people)
+    list_sub.add_parser("groups", help="List known groups plus live groups").set_defaults(func=list_groups)
+    premade_list = list_sub.add_parser("premade", help="List saved premade transactions")
+    premade_list.add_argument("--file", default=str(DEFAULT_PREMADE))
+    premade_list.set_defaults(func=list_premade)
+
+    add = sub.add_parser("add", help="Create a one-off expense")
+    add.add_argument("--description", "--desc", required=True)
+    add.add_argument("--cost")
+    add.add_argument("--paid-by", required=True, help="Splitwise user ID who paid")
+    add.add_argument("--owe", action="append", help="User ID or comma-separated IDs who owe (equal split)")
+    add.add_argument("--share", action="append", help="Exact owed share USER_ID=AMOUNT; repeatable")
+    add.add_argument("--group", help="Splitwise group ID")
+    add.add_argument("--date", help="Expense date YYYY-MM-DD")
+    add.add_argument("--currency", default="USD")
+    add.add_argument("--split", choices=["equal", "exact"], default="equal")
+    add.add_argument("--dry-run", action="store_true")
+    add.set_defaults(func=add_expense)
+
+    premade = sub.add_parser("premade", help="Manage saved premade transactions")
+    premade_sub = premade.add_subparsers(dest="what", required=True)
+    premade_add = premade_sub.add_parser("add", help="Save a new premade transaction (never hand-edit the JSONL)")
+    premade_add.add_argument("--name", required=True, help="Unique premade name, e.g. phone_bill")
+    premade_add.add_argument("--alias", action="append", help="Alternate name; repeatable")
+    premade_add.add_argument("--description", "--desc", help="Description; supports {current_month}, {month}, {year}, {today}. Defaults to the name.")
+    premade_add.add_argument("--group", help="Splitwise group ID")
+    premade_add.add_argument("--paid-by", help="Default payer user ID; omit to require it at run time")
+    premade_add.add_argument("--currency", help="Currency code; defaults to USD")
+    premade_add.add_argument("--share", action="append", help="Owed share USER_ID=AMOUNT; repeatable, at least one required")
+    premade_add.add_argument("--file", default=str(DEFAULT_PREMADE))
+    premade_add.set_defaults(func=add_premade)
+
+    run = sub.add_parser("run", help="Run a saved premade transaction by name or alias")
+    run.add_argument("name")
+    run.add_argument("--paid-by", help="Override payer Splitwise user ID")
+    run.add_argument("--group", help="Override group ID")
+    run.add_argument("--date", help="Expense date YYYY-MM-DD")
+    run.add_argument("--currency", help="Override currency code")
+    run.add_argument("--file", default=str(DEFAULT_PREMADE))
+    run.add_argument("--dry-run", action="store_true")
+    run.set_defaults(func=run_premade)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
