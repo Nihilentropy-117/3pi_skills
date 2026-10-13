@@ -10,6 +10,7 @@ TickTick's Open API has no separate "events"; calendar entries are tasks with a 
 ```
 python /data/agent/skills/ticktick/tt.py projects
 python /data/agent/skills/ticktick/tt.py add "Dentist" --start "2026-10-20 14:30" [--end "2026-10-20 15:30"] [--allday] [--project NAME] [--desc TEXT] [--remind 15]
+python /data/agent/skills/ticktick/tt.py update ID [--title T] [--start "2027-06-01" --allday] [--desc TEXT]   # id from search/list
 python /data/agent/skills/ticktick/tt.py search "dentist"            # title/content substring, all projects
 python /data/agent/skills/ticktick/tt.py list [--from YYYY-MM-DD] [--days 7]   # dated, uncompleted items in range
 ```

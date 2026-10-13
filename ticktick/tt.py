@@ -48,6 +48,7 @@ sp.add_parser("projects")
 x = sp.add_parser("add"); x.add_argument("title"); x.add_argument("--start", required=True)
 x.add_argument("--end"); x.add_argument("--allday", action="store_true")
 x.add_argument("--project"); x.add_argument("--desc"); x.add_argument("--remind", type=int)
+x = sp.add_parser("update"); x.add_argument("id"); x.add_argument("--title"); x.add_argument("--start"); x.add_argument("--allday", action="store_true"); x.add_argument("--desc")
 x = sp.add_parser("search"); x.add_argument("q")
 x = sp.add_parser("list"); x.add_argument("--from", dest="frm"); x.add_argument("--days", type=int, default=7)
 n = a.parse_args()
@@ -67,6 +68,16 @@ elif n.c == "add":
         body["projectId"] = m[0]["id"]
     t = api("POST", "/task", body)
     print("created:", t["id"], t["title"], t.get("startDate"))
+elif n.c == "update":
+    t = next((t for t in all_tasks() if t["id"] == n.id), None)
+    if not t: sys.exit("task not found")
+    body = {"id": t["id"], "projectId": t["projectId"]}
+    if n.title: body["title"] = n.title
+    if n.desc is not None: body["content"] = n.desc
+    if n.start:
+        s = parse(n.start); body.update(startDate=fmt(s), dueDate=fmt(s if n.allday else s + timedelta(hours=1)), isAllDay=n.allday, timeZone=TZN)
+    r = api("POST", "/task/" + t["id"], body)
+    print("updated:", r["id"], r["title"], r.get("startDate"))
 elif n.c == "search":
     q = n.q.lower()
     for t in all_tasks():
