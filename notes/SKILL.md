@@ -37,40 +37,6 @@ find "/workspace/Grays Files/Notes" -name '*.md' -newermt '-7 days'  # recently 
 Quote paths: folder names contain spaces. Notes link to each other with `[[Note name]]`;
 resolve a link by searching for `Note name.md`.
 
-## Semantic search (smartvec.py)
-`smartvec.py` (next to this file) queries the vault's **Smart Connections** embeddings
-(`.smart-env/` folder, written by the Obsidian plugin) without Obsidian. Use it for fuzzy or
-"related to" questions where `rg` keyword search misses; use `rg` for exact terms.
-
-```bash
-S=/data/agent/skills/notes/smartvec.py
-python $S .smart-env info                                  # counts, stale rows, model
-python $S .smart-env search "copier fuser error" -k 10     # best sections (blocks)
-python $S .smart-env search "copier fuser error" --notes   # best whole notes
-python $S .smart-env near "Intake/Carlin.md" --notes       # notes related to this one
-python $S .smart-env export vectors.jsonl                  # {"key","vec"} per line
-```
-`ENV` (first arg) is the vault's `.smart-env` folder; give its full path
-(`/workspace/Grays Files/Notes/.smart-env`) unless you are in the vault root.
-
-How it works:
-- Reads `smart_sources/smart_sources.ajson` (metadata; append-only JSON lines, later lines win,
-  `null` deletes). Each note/block entry points at a row in a raw vector file
-  (`smart_sources/<file>` for notes, `smart_blocks/<file>` for blocks): float32 little-endian,
-  384 dims, no header. Model: `TaylorAI/bge-micro-v2` (from `embedding_models.ajson`).
-- Only rows that metadata points at are used; other rows are stale (deleted/edited notes) and
-  ignored. `info` reports the stale count.
-- Vectors are L2-normalised; ranking is cosine similarity (dot product). Output is
-  `score  key`; blocks keys look like `Folder/Note.md#Heading`, notes keys are paths.
-- Default is **blocks** (sections); `--notes` uses one vector per whole note.
-- `search` embeds the query locally with the same model via `sentence_transformers` (first run
-  downloads the model). `near` needs no model: it uses the note's own vector (blocks mode
-  averages the note's block vectors, or takes an exact block key) and excludes the note itself.
-- `export` dumps normalised vectors as JSONL for other tooling.
-- Read-only: it never writes to the vault. Write `export` output under `/workspace/out/`.
-- Needs `numpy` (and `sentence_transformers` for `search`); `pip install` if missing.
-- Scores only mean something relative to each other; the index lags recent edits until
-  Obsidian re-embeds them.
 
 ## Writing to Intake
 - Obsidian Markdown, one note per file, `.md` extension.
