@@ -49,6 +49,7 @@ x = sp.add_parser("add"); x.add_argument("title"); x.add_argument("--start", req
 x.add_argument("--end"); x.add_argument("--allday", action="store_true")
 x.add_argument("--project"); x.add_argument("--desc"); x.add_argument("--remind", type=int)
 x = sp.add_parser("update"); x.add_argument("id"); x.add_argument("--title"); x.add_argument("--start"); x.add_argument("--allday", action="store_true"); x.add_argument("--desc")
+x = sp.add_parser("delete"); x.add_argument("id")
 x = sp.add_parser("search"); x.add_argument("q")
 x = sp.add_parser("list"); x.add_argument("--from", dest="frm"); x.add_argument("--days", type=int, default=7)
 n = a.parse_args()
@@ -78,6 +79,11 @@ elif n.c == "update":
         s = parse(n.start); body.update(startDate=fmt(s), dueDate=fmt(s if n.allday else s + timedelta(hours=1)), isAllDay=n.allday, timeZone=TZN)
     r = api("POST", "/task/" + t["id"], body)
     print("updated:", r["id"], r["title"], r.get("startDate"))
+elif n.c == "delete":
+    t = next((t for t in all_tasks() if t["id"] == n.id), None)
+    if not t: sys.exit("task not found")
+    api("DELETE", f"/project/{t['projectId']}/task/{t['id']}")
+    print("deleted:", t["id"], t["title"])
 elif n.c == "search":
     q = n.q.lower()
     for t in all_tasks():
